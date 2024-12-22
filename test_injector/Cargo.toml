@@ -1,0 +1,14 @@
+[package]
+name = "array-widener-test-injector"
+version = "0.1.0"
+description = "Simple DLL injector"
+edition.workspace = true
+authors.workspace = true
+keywords.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["bin"]
+
+[dependencies]

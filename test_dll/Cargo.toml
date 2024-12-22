@@ -1,0 +1,31 @@
+[package]
+name = "array-widener-test-dll"
+version = "0.1.0"
+description = "Test DLL using the array widener to expand the PartyMemberInfo array in Elden Ring"
+edition.workspace = true
+authors.workspace = true
+keywords.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+array-widener = { path = ".." }
+log = { version = "0.4" }
+simple_logger = "5.0"
+
+[dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_System_Kernel",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_System_SystemInformation",
+    "Win32_System_ProcessStatus",
+    "Win32_System_SystemServices",
+    "Win32_System_Console"
+]

@@ -1,0 +1,48 @@
+[workspace]
+members = ["proc_macros", "test_dll"]
+
+[workspace.package]
+edition = "2021"
+authors = ["William Tremblay <tremwil@users.noreply.github.com>"]
+keywords = ["instrumentation", "modding", "hooking"]
+license = "MIT"
+repository = "https://github.com/tremwil/array-widener"
+
+[package]
+name = "array-widener"
+version = "0.1.0"
+description = "Utilities to generate assembly patches for extending an object's inline array at runtime"
+edition.workspace = true
+authors.workspace = true
+keywords.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+seq-macro = "0.3"
+thiserror = "2.0"
+pelite = "0.10.0"
+array-widener-proc-macros = { path = "proc_macros", version = "0.1.0" }
+iced-x86 = { git = "https://github.com/tremwil/iced.git", tag = "1.1", features = [ "default", "code_asm" ] }
+fxhash = "0.2"
+log = "0.4"
+
+[dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_System_Kernel",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_System_SystemInformation",
+    "Win32_System_ProcessStatus"
+]
+
+[profile.release]
+codegen-units = 1
+opt-level = 3
+panic = "abort"
+debug = "full"
+debug-assertions = false
+overflow-checks = false
