@@ -8,7 +8,7 @@ pub mod rwe_buffer;
 pub mod thunk;
 pub mod trampoline;
 pub mod widenable;
-pub mod winapi_utils;
+mod winapi_utils;
 
 pub use iced_x86;
 pub use widenable::Widenable;

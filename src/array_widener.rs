@@ -1,9 +1,4 @@
-use std::{
-    cmp::Ordering,
-    marker::PhantomData,
-    sync::RwLock,
-    time::Duration,
-};
+use std::{cmp::Ordering, marker::PhantomData, sync::RwLock, time::Duration};
 
 use fxhash::FxHashMap;
 use iced_x86::{
@@ -60,14 +55,25 @@ pub fn read_gpr(ctx: &CONTEXT, register: Register) -> Option<u64> {
     Some(full_reg & 1u64.checked_shl(8 * register.size() as u32).unwrap_or(0).wrapping_sub(1))
 }
 
+/// Context object passed to an [`ArrayWidener`] access type heuristic providing information about
+/// the instruction that is about to be patched.
 pub struct Context<'a> {
+    /// Memory that was accessed by the instruction.
     pub accessed_memory_address: usize,
+    /// Bytes spanned by the instruction.
     pub instruction_bytes: &'a [u8],
+    /// Original instruction address, if it was relocated during a previous hook. This should be
+    /// used to match harcoded instructions.
     pub original_instruction_address: usize,
+    /// The decoded instruction.
     pub instruction: Instruction,
+    /// Context of the thread where the instruction was executed.
     pub thread_context: &'a CONTEXT,
 }
 
+/// Builder pattern helper for creating [`ArrayWidener`] instances.
+///
+/// Create using [`Builder::default`] or [`ArrayWidener::builder`].
 pub struct Builder<Orig: Widenable, Widened: Widenable> {
     phantom: PhantomData<fn() -> (Orig, Widened)>,
     reserved_memory_size: usize,
@@ -98,6 +104,12 @@ impl<O: Widenable, W: Widenable> Default for Builder<O, W> {
 }
 
 impl<O: Widenable, W: Widenable> Builder<O, W> {
+    /// Set the size of the contiguous memory block that is to be reserved for instances of this
+    /// type. Exhausting this memory block at runtime will lead to an *unrecoverable* panic!
+    ///
+    /// Note that the memory is merely reserved, and portions of it are comitted as instances are
+    /// allocated. Hence you may pass a fairly large number (multiple GBs worth) without exhausting
+    /// the available physical memory.
     pub fn reserved_memory_size(self, size: usize) -> Self {
         Self {
             reserved_memory_size: size,
@@ -105,16 +117,29 @@ impl<O: Widenable, W: Widenable> Builder<O, W> {
         }
     }
 
+    /// Set the address of call instructions invoking an allocator that must be replaced
+    /// to replace instances of the type by its widened layout.
     pub fn alloc_calls(mut self, calls: impl IntoIterator<Item = u64>) -> Self {
         self.alloc_calls.extend(calls);
         self
     }
 
+    /// Set the address of call instructions invoking an allocator's free function. These should be
+    /// the free calls matching the alloc calls provided in [`Builder::alloc_calls`].
     pub fn free_calls(mut self, calls: impl IntoIterator<Item = u64>) -> Self {
         self.free_calls.extend(calls);
         self
     }
 
+    /// Provide a custom access type heuristic.
+    ///
+    /// The heuristic function should use the information available in the [`ArrayWidener`]
+    /// and [`Context`] provided to determine which portion of the widened type is being accessed.
+    ///
+    /// In absense of a user-provided heuristic, the default one,
+    /// [`ArrayWidener::default_access_heuristic`], is used.
+    ///
+    /// Incorrect guesses may lead to UB or logic errors in the program being patched.
     pub fn access_type_heuristic<F>(self, heuristic: F) -> Self
     where
         F: FnMut(&ArrayWidener, &Context) -> WidenedAccessType + 'static + Send + Sync,
@@ -125,6 +150,7 @@ impl<O: Widenable, W: Widenable> Builder<O, W> {
         }
     }
 
+    /// Consume the builder and create a finalized [`ArrayWidener`] instance.
     pub fn build(self) -> ArrayWidener {
         let memory_layout = &W::INSTANCE_LAYOUT;
         let field_shift =
@@ -184,10 +210,11 @@ pub struct ArrayWidener {
 }
 
 impl ArrayWidener {
-    /// Create an [`Builder`] adapting the memory layout of `O` to that of `W`.
+    /// Create an [`Builder`] for an [`ArrayWidener`] adapting the memory layout of `O` to that of
+    /// `W`.
     ///
     /// Consult the [`Builder`] documentation to see how the array widener can be customized.
-    pub fn new<O: Widenable, W: Widenable>() -> Builder<O, W> {
+    pub fn builder<O: Widenable, W: Widenable>() -> Builder<O, W> {
         Builder::default()
     }
 
@@ -384,6 +411,7 @@ pub struct ArrayWidenerManager {
 }
 
 impl ArrayWidenerManager {
+    /// Create a new [`ArrayWidenerManager`] with codegen blocks of the given size.
     pub fn new(codegen_arena_size: usize) -> Self {
         Self {
             array_wideners: Default::default(),
@@ -405,6 +433,9 @@ impl ArrayWidenerManager {
         }
     }
 
+    /// Register an array widener with this manager.
+    ///
+    /// This has no effect until [`ArrayWidenerManager::enable`] is called.
     pub fn register(&mut self, array_widener: ArrayWidener) {
         self.array_wideners.push(array_widener)
     }
@@ -412,6 +443,15 @@ impl ArrayWidenerManager {
     /// Enables the array widener, leaking its memory.
     ///
     /// It is not possible to access or disable the array widener after this has been called.
+    ///
+    /// # Safety
+    /// The registered array wideners must have provided valid code addresses for their alloc and
+    /// free calls.
+    ///
+    /// Other than that, no specific guarantees. After this is called, stability of the program is
+    /// provided as a best-effort and is dependent on many factors, such as being able to
+    /// identify and walk the functions patched instructions fall in and access type heuristics
+    /// producing the correct guesses.
     pub unsafe fn enable(mut self) {
         // Setup allocator replacements and alloc/free hooks
         for aw in &mut self.array_wideners {
