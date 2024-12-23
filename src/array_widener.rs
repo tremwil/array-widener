@@ -347,7 +347,12 @@ impl ArrayWidener {
         Ok(asm)
     }
 
-    /// Default heuristic for determining the memory access type
+    /// Default heuristic for determining the memory access type.
+    ///
+    /// Typically works quite well if no array, pointer or non-primitive field is present after
+    /// the widened one. If this is not the case, there will definitely be incorrect guesses and
+    /// it is recommended to run without widening to collect 100% accurate information which can
+    /// then be hardcoded.
     pub fn default_access_heuristic(&self, ctx: &Context) -> WidenedAccessType {
         if !ctx.instruction.op_kinds().any(|op| op == OpKind::Memory) {
             log::error!("Not a memory instruction");
@@ -386,10 +391,10 @@ impl ArrayWidener {
                 WidenedAccessType::PostField
             }
         }
-        // The memory base is within the original field
+        // The memory base is within the widened field
         // This is very likely an access within the field
         else if base_offset >= orig_field_layout.offset
-            && base_offset < orig_field_layout.end_offset()
+            && base_offset < wide_field_layout.end_offset()
         {
             WidenedAccessType::InField
         }
