@@ -34,7 +34,7 @@ fn bootstrap() -> Result<(), Box<dyn Error>> {
     let er_base = unsafe { GetModuleHandleA(PCSTR(std::ptr::null())) }.unwrap().0 as u64;
     log::info!("ER base: {er_base:016x}");
 
-    let pmi_widener = ArrayWidener::builder::<PartyMemberInfo<6>, PartyMemberInfo<127>>()
+    let pmi_widener = ArrayWidener::builder::<PartyMemberInfo<6>, PartyMemberInfo<6>>()
         .alloc_calls([er_base + ALLOC_RVA])
         .free_calls([er_base + FREE_RVA])
         .reserved_memory_size(0x10000)
