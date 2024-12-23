@@ -1,9 +1,14 @@
 // |... start fields|invalid for whole object|
 
+use std::ffi::c_void;
+
 use fxhash::{FxHashMap, FxHashSet};
 use iced_x86::{BlockEncoder, BlockEncoderOptions, Code, IcedError, Instruction, InstructionBlock};
+use windows::Win32::System::Memory::{
+    VirtualProtect, PAGE_EXECUTE_READWRITE, PAGE_PROTECTION_FLAGS,
+};
 
-use crate::{cfg::ControlFlowGraph, iced_ext::Decoder};
+use crate::{cfg::ControlFlowGraph, iced_ext::Decoder, winapi_utils};
 
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
@@ -239,9 +244,9 @@ impl Trampoline {
     }
 
     pub unsafe fn apply_to_memory(&self) -> &Self {
-        for (ip, block) in self.generated_code.iter().rev() {
+        for (ip, block) in &self.generated_code {
             unsafe {
-                std::ptr::copy_nonoverlapping(block.as_ptr(), *ip as *mut u8, block.len());
+                winapi_utils::patch_code(*ip, &block);
             }
         }
         self

@@ -1,15 +1,17 @@
-use std::{ops::Range, sync::LazyLock};
+use std::{ffi::c_void, ops::Range, sync::LazyLock};
 
 use windows::{
     core::PCSTR,
     Win32::{
         Foundation::{HANDLE, HMODULE, NTSTATUS},
         System::{
+            Diagnostics::Debug::FlushInstructionCache,
             LibraryLoader::{
                 GetModuleHandleA, GetModuleHandleExA, GetProcAddress,
                 GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
                 GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
             },
+            Memory::{VirtualProtect, PAGE_EXECUTE_READWRITE, PAGE_PROTECTION_FLAGS},
             ProcessStatus::{GetModuleInformation, MODULEINFO},
             Threading::{
                 GetCurrentProcess, GetCurrentThreadId, GetThreadId, SuspendThread,
@@ -20,7 +22,7 @@ use windows::{
 };
 
 /// Get an HMODULE given a pointer to memory inside of it.
-pub fn hmodule_from_ptr(ptr: *const ()) -> Option<HMODULE> {
+pub(crate) fn hmodule_from_ptr(ptr: *const ()) -> Option<HMODULE> {
     let mut hmod = HMODULE::default();
     unsafe {
         GetModuleHandleExA(
@@ -40,7 +42,7 @@ pub fn hmodule_from_ptr(ptr: *const ()) -> Option<HMODULE> {
 ///
 /// # Panics
 /// If the handle is invalid or does not have enough permissions
-pub fn module_info(hmod: HMODULE) -> MODULEINFO {
+pub(crate) fn module_info(hmod: HMODULE) -> MODULEINFO {
     let mut minfo = MODULEINFO::default();
     unsafe {
         GetModuleInformation(
@@ -57,7 +59,7 @@ pub fn module_info(hmod: HMODULE) -> MODULEINFO {
 }
 
 /// Gets the region of memory occupied by a module given its handle
-pub fn module_region(hmod: HMODULE) -> Range<usize> {
+pub(crate) fn module_region(hmod: HMODULE) -> Range<usize> {
     let minfo = module_info(hmod);
     let start = minfo.lpBaseOfDll as usize;
     let end = unsafe { minfo.lpBaseOfDll.byte_add(minfo.SizeOfImage as usize) } as usize;
@@ -95,5 +97,24 @@ pub(crate) fn suspend_threads() {
                 SuspendThread(thread);
             }
         }
+    }
+}
+
+pub(crate) unsafe fn patch_code(ip: u64, new_code: &[u8]) {
+    let protect_start = (ip & !0xFFF) as *const c_void;
+    let protect_size = ip as usize + new_code.len() - protect_start as usize;
+    unsafe {
+        let mut old_protect = PAGE_PROTECTION_FLAGS(0);
+        VirtualProtect(
+            protect_start,
+            protect_size,
+            PAGE_EXECUTE_READWRITE,
+            &mut old_protect,
+        )
+        .unwrap();
+        std::ptr::copy_nonoverlapping(new_code.as_ptr(), ip as *mut u8, new_code.len());
+        VirtualProtect(protect_start, protect_size, old_protect, &mut old_protect).unwrap();
+
+        FlushInstructionCache(GetCurrentProcess(), Some(protect_start), protect_size).ok();
     }
 }

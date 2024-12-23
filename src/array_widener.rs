@@ -165,6 +165,10 @@ pub enum WidenedAccessType {
     PostField,
 }
 
+/// Stores information necessary to generate the assembly patches translating code to operate on
+/// widened [`Widenable`] structs.
+///
+/// Must be registed using [`ArrayWidenerManager::register`] to take effect.
 pub struct ArrayWidener {
     pub orig_layout: &'static WidenableMeta,
     pub wide_layout: &'static WidenableMeta,
@@ -181,11 +185,14 @@ pub struct ArrayWidener {
 }
 
 impl ArrayWidener {
+    /// Create an [`Builder`] adapting the memory layout of `O` to that of `W`.
+    ///
+    /// Consult the [`Builder`] documentation to see how the array widener can be customized.
     pub fn new<O: Widenable, W: Widenable>() -> Builder<O, W> {
         Builder::default()
     }
 
-    pub fn generate_hook(&mut self, ctx: &Context<'_>, hook_ip: u64) -> Option<Vec<u8>> {
+    fn generate_hook(&mut self, ctx: &Context<'_>, hook_ip: u64) -> Option<Vec<u8>> {
         // Take the heuristic box out of the option so we can pass self to it
         let access_type = match self.access_type_heuristic.take() {
             Some(mut h) => {
@@ -366,6 +373,7 @@ impl ArrayWidener {
     }
 }
 
+/// Stores the information required to operate multiple [`ArrayWidener`] instances.
 pub struct ArrayWidenerManager {
     array_wideners: Vec<ArrayWidener>,
     codegen_arenas: RWEArenaCache,
@@ -423,8 +431,9 @@ impl ArrayWidenerManager {
 
             let near_call_hook = |ip, thunk| unsafe {
                 let ip_offset = (thunk as i64 - (ip + 5) as i64) as i32;
-                *(ip as *mut u8) = 0xE8;
-                ((ip + 1) as *mut i32).write_unaligned(ip_offset);
+                let mut code = *b"\xE8\0\0\0\0";
+                code[1..].copy_from_slice(&ip_offset.to_le_bytes());
+                winapi_utils::patch_code(ip, &code);
             };
 
             for &alloc_call in &aw.alloc_calls {
