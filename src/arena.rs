@@ -27,7 +27,6 @@ pub trait Arena {
     type Error: From<OutOfMemoryError>;
 
     /// Allocate memory corresponding to a given [`Layout`].
-    #[must_use]
     fn alloc(&self, layout: Layout) -> Result<*mut (), Self::Error>;
 }
 
@@ -246,7 +245,7 @@ pub trait ArenaExt: Arena {
     #[inline]
     fn store<'a, T: 'a>(&'a self, value: T) -> Result<ArenaRef<'a, T>, Self::Error> {
         let ptr = self.alloc(Layout::new::<T>())? as *mut MaybeUninit<T>;
-        Ok(unsafe { ArenaRef::new((&mut *ptr).write(value)) })
+        Ok(unsafe { ArenaRef::new((*ptr).write(value)) })
     }
 
     /// Creates an iterator which consumes `values`, creating a separate allocation for each item.
@@ -281,14 +280,14 @@ pub trait ArenaExt: Arena {
         I: IntoIterator<Item = T>,
         I::IntoIter: ExactSizeIterator,
     {
-        let mut values = values.into_iter();
+        let values = values.into_iter();
         let num_values = values.len();
 
         let array_layout = Layout::array::<T>(num_values).or(Err(OutOfMemoryError))?;
         let ptr = self.alloc(array_layout)? as *mut MaybeUninit<T>;
 
         let mut n_written = 0;
-        while let Some(value) = values.next() {
+        for value in values {
             if n_written >= num_values {
                 break;
             }

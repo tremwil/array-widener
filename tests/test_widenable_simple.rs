@@ -1,7 +1,6 @@
 use std::alloc::Layout;
 
 use array_widener::widenable::{Widenable, PAGE_SIZE};
-use iced_x86::{Decoder, DecoderOptions};
 
 #[repr(C)]
 struct PartyMember {

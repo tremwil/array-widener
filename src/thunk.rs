@@ -197,7 +197,7 @@ where
     let copied_thunk = rwe_buf.copy_slice(compiled_thunk)?;
 
     // write closure ptr to closure address
-    (&mut copied_thunk[cl_addr_index..cl_addr_index + 8])
+    copied_thunk[cl_addr_index..cl_addr_index + 8]
         .copy_from_slice(&(closure_ref.as_const_ptr() as usize).to_le_bytes());
 
     Ok(ThunkRef {
@@ -294,6 +294,7 @@ pub trait StoreThunk: ExecArena {
 
 impl<A: ExecArena + ?Sized> StoreThunk for A {}
 
+#[cfg(test)]
 mod tests {
     /// Make sure that creating a thunk for a closure mutably capturing a variable can't alias the
     /// variable when dropped.

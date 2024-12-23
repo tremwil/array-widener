@@ -1,8 +1,7 @@
 use std::{
     cmp::Ordering,
     marker::PhantomData,
-    ops::Range,
-    sync::{Arc, RwLock},
+    sync::RwLock,
     time::Duration,
 };
 
@@ -133,8 +132,8 @@ impl<O: Widenable, W: Widenable> Builder<O, W> {
 
         // TODO: Make this work for arbitrary alignment
         let post_field_shift = field_shift
-            + (&W::META.widenable_field_layout().end_offset()
-                - &O::META.widenable_field_layout().end_offset()) as u64;
+            + (W::META.widenable_field_layout().end_offset()
+                - O::META.widenable_field_layout().end_offset()) as u64;
 
         ArrayWidener {
             instance_mem_base: 0,
@@ -287,7 +286,7 @@ impl ArrayWidener {
             let mut reserved_mem_size = InlineDq::new(&mut asm);
             asm.cmp(rax, qword_ptr(reserved_mem_size.data_label))?;
             asm.jae(normal_path)?;
-            reserved_mem_size.emit(&mut asm, self.instance_mem_size as u64)?;
+            reserved_mem_size.emit(&mut asm, self.instance_mem_size)?;
         }
 
         asm.and(rax, (self.memory_layout.block_size - 1) as i32)?;
@@ -323,7 +322,7 @@ impl ArrayWidener {
 
     /// Default heuristic for determining the memory access type
     pub fn default_access_heuristic(&self, ctx: &Context) -> WidenedAccessType {
-        if ctx.instruction.op_kinds().find(|op| op == &OpKind::Memory).is_none() {
+        if !ctx.instruction.op_kinds().any(|op| op == OpKind::Memory) {
             log::error!("Not a memory instruction");
             return WidenedAccessType::Unknown;
         }
@@ -347,7 +346,7 @@ impl ArrayWidener {
 
         let base = ctx.instruction.memory_base();
         let signed_disp = ctx.instruction.memory_displacement64() as i64 as isize;
-        let base_addr = read_gpr(&ctx.thread_context, base).unwrap() as usize;
+        let base_addr = read_gpr(ctx.thread_context, base).unwrap() as usize;
         let base_offset = base_addr - instance_ptr;
 
         // The memory base is equal to the widenable struct
@@ -395,7 +394,7 @@ impl ArrayWidenerManager {
             decoder: unsafe {
                 Decoder::try_with_slice_ptr(
                     64,
-                    std::ptr::slice_from_raw_parts(0 as *const _, 1 << 47),
+                    std::ptr::slice_from_raw_parts(std::ptr::null(), 1 << 47),
                     0,
                     DecoderOptions::NONE,
                 )
@@ -438,7 +437,7 @@ impl ArrayWidenerManager {
 
             for &alloc_call in &aw.alloc_calls {
                 let arena = self.codegen_arenas.near_ptr(alloc_call as *const _).unwrap();
-                let thunk = arena.store_thunk(cconv::C(new_alloc.clone())).unwrap().leak();
+                let thunk = arena.store_thunk(cconv::C(new_alloc)).unwrap().leak();
                 log::debug!(
                     "hooking alloc call: {:016x} -> {:016x}",
                     alloc_call,
@@ -448,7 +447,7 @@ impl ArrayWidenerManager {
             }
             for &alloc_call in &aw.free_calls {
                 let arena = self.codegen_arenas.near_ptr(alloc_call as *const _).unwrap();
-                let thunk = arena.store_thunk(cconv::C(new_free.clone())).unwrap().leak();
+                let thunk = arena.store_thunk(cconv::C(new_free)).unwrap().leak();
                 log::debug!(
                     "hooking free call: {:016x} -> {:016x}",
                     alloc_call,
@@ -529,7 +528,7 @@ impl ArrayWidenerManager {
                 instruction_address,
                 new_ip
             );
-            thread_context.Rip = new_ip as u64;
+            thread_context.Rip = new_ip;
             return EXCEPTION_CONTINUE_EXECUTION;
         }
 
@@ -589,7 +588,7 @@ impl ArrayWidenerManager {
             // Create trampoline
             let trampoline = Trampoline::new(
                 &mut self.decoder,
-                maybe_cfg.as_ref().map(|x| &**x),
+                maybe_cfg.as_deref(),
                 TrampolineParams {
                     hook_ip,
                     insert_ip: instruction_address,
@@ -644,7 +643,7 @@ impl ArrayWidenerManager {
             thread_context.Rip = new_rip;
         }
 
-        return EXCEPTION_CONTINUE_EXECUTION;
+        EXCEPTION_CONTINUE_EXECUTION
     }
 }
 
@@ -696,7 +695,7 @@ unsafe fn extend_cfg_if_required<'a>(
             let mut fun = &ex_table.image()[index];
             let mut unwind_info = &*((mod_addr + fun.UnwindData as u64) as *const UNWIND_INFO);
             while unwind_info.VersionFlags & UNW_FLAG_CHAININFO != 0 {
-                let offset = (unwind_info.CountOfCodes + 1 & !1) as usize;
+                let offset = ((unwind_info.CountOfCodes + 1) & !1) as usize;
                 fun = &*(unwind_info.UnwindCode.get_unchecked(offset) as *const _
                     as *const RUNTIME_FUNCTION);
                 unwind_info = &*((mod_addr + fun.UnwindData as u64) as *const UNWIND_INFO);

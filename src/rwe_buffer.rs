@@ -18,10 +18,8 @@ use windows::Win32::{
             VirtualAlloc, VirtualAlloc2, VirtualFree, VirtualQuery, MEMORY_BASIC_INFORMATION,
             MEM_ADDRESS_REQUIREMENTS, MEM_COMMIT, MEM_EXTENDED_PARAMETER, MEM_EXTENDED_PARAMETER_0,
             MEM_EXTENDED_PARAMETER_1, MEM_RELEASE, MEM_RESERVE, PAGE_EXECUTE_READWRITE,
-            PAGE_READWRITE,
         },
         SystemInformation::{GetSystemInfo, SYSTEM_INFO},
-        Threading::GetCurrentProcess,
     },
 };
 
@@ -138,7 +136,7 @@ impl RWEBuffer {
 
         let alloc_base = unsafe {
             VirtualAlloc2(
-                HANDLE(0 as *mut c_void),
+                HANDLE(std::ptr::null_mut::<c_void>()),
                 None,
                 size,
                 MEM_RESERVE | MEM_COMMIT,
@@ -328,11 +326,11 @@ impl RWEArenaCache {
     ) -> Option<&'a mut Box<RWEArena>> {
         // Find the maximum separation between two ranges
         fn max_sep(a: &Range<usize>, b: &Range<usize>) -> usize {
-            return Ord::max(a.end, b.end) - Ord::min(a.start, b.start);
+            Ord::max(a.end, b.end) - Ord::min(a.start, b.start)
         }
         arenas
             .into_iter()
-            .filter_map(|ar| (max_sep(&ar.buffer.region(), &region) < NEAR_JMP_RANGE).then_some(ar))
+            .filter_map(|ar| (max_sep(&ar.buffer.region(), region) < NEAR_JMP_RANGE).then_some(ar))
             .max_by_key(|ar| {
                 let arena_region = ar.buffer.region();
                 if arena_region.start <= region.start && arena_region.end >= region.end {
@@ -342,7 +340,7 @@ impl RWEArenaCache {
             })
     }
 
-    pub fn anywhere<'a>(&'a mut self, size: usize) -> &'a mut RWEArena {
+    pub fn anywhere(&mut self, size: usize) -> &mut RWEArena {
         if self.non_mod_arenas.is_empty() {
             self.non_mod_arenas.push(Box::new(RWEArena::new(size)));
         }
@@ -378,7 +376,7 @@ impl RWEArenaCache {
     /// Tries to get an arena within near jump range of a given module.
     ///
     /// If no arena was created for this module specifically, will attempt to create a new one.
-    pub fn near_module<'a>(&'a mut self, module: HMODULE) -> Option<&'a mut RWEArena> {
+    pub fn near_module(&mut self, module: HMODULE) -> Option<&mut RWEArena> {
         let boxed = match self.mod_arenas.entry(module.0 as u64) {
             Entry::Occupied(b) => b.into_mut(),
             Entry::Vacant(vacant) => {
@@ -396,7 +394,7 @@ impl RWEArenaCache {
     ///
     /// If the pointer lies inside a module, the region is the entire module. Otherwise, it is the
     /// range of pages from the allocation base to the end of the region returned by VirtualQuery.
-    pub fn near_ptr<'a>(&'a mut self, ptr: *const ()) -> Option<&'a mut RWEArena> {
+    pub fn near_ptr(&mut self, ptr: *const ()) -> Option<&mut RWEArena> {
         if let Some(hmod) = hmodule_from_ptr(ptr) {
             return self.near_module(hmod);
         }
@@ -420,6 +418,7 @@ impl RWEArenaCache {
     }
 }
 
+#[cfg(test)]
 mod tests {
     use windows::Win32::Foundation::GetLastError;
 

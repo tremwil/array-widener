@@ -81,7 +81,8 @@ impl<'a> Decoder<'a> {
         instruction: &mut Instruction,
     ) -> Result<(), IcedError> {
         self.set_pos_from_ip(ip)?;
-        Ok(self.decode_out(instruction))
+        self.decode_out(instruction);
+        Ok(())
     }
 
     /// Decodes the instruction at the given IP, setting the decoder's position to match it first.
@@ -99,7 +100,7 @@ impl<'a> Deref for Decoder<'a> {
     }
 }
 
-impl<'a> DerefMut for Decoder<'a> {
+impl DerefMut for Decoder<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
     }

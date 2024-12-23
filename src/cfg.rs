@@ -93,7 +93,7 @@ impl ControlFlowGraph {
             if let Some(mut branch) = self.branches.remove(&old) {
                 replace_addrs(branch.targets_mut()); // Handle self-referring branches
                 for xrefs_addr in branch.targets() {
-                    self.xrefs.get_mut(xrefs_addr).map(|x| replace_addrs(x));
+                    if let Some(x) = self.xrefs.get_mut(xrefs_addr) { replace_addrs(x) }
                 }
                 self.branches.insert(new, branch);
             }
@@ -101,7 +101,7 @@ impl ControlFlowGraph {
             if let Some(mut xrefs) = self.xrefs.remove(&old) {
                 replace_addrs(&mut xrefs); // Handle self-referring branches
                 for branch_addr in xrefs.iter() {
-                    self.branches.get_mut(branch_addr).map(|b| replace_addrs(b.targets_mut()));
+                    if let Some(b) = self.branches.get_mut(branch_addr) { replace_addrs(b.targets_mut()) }
                 }
                 self.xrefs.insert(new, xrefs);
             }
@@ -112,13 +112,12 @@ impl ControlFlowGraph {
         let addresses: FxHashSet<u64> = addresses.into_iter().collect();
         let mut xrefs_done: FxHashSet<u64> = FxHashSet::default();
         for addr in &addresses {
-            self.instructions.remove(&addr);
-            self.xrefs.remove(&addr);
-            if let Some(branch) = self.branches.remove(&addr) {
+            self.instructions.remove(addr);
+            self.xrefs.remove(addr);
+            if let Some(branch) = self.branches.remove(addr) {
                 for target in branch.targets().iter().filter(|t| xrefs_done.insert(**t)) {
-                    self.xrefs
-                        .get_mut(target)
-                        .map(|xrefs| xrefs.retain(|x| !addresses.contains(x)));
+                    if let Some(xrefs) = self.xrefs
+                        .get_mut(target) { xrefs.retain(|x| !addresses.contains(x)) }
                 }
             }
         }

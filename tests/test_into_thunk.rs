@@ -1,6 +1,6 @@
 use array_widener::{
     rwe_buffer::RWEArena,
-    thunk::{cconv, FnMutThunkable, StoreThunk},
+    thunk::{cconv, StoreThunk},
 };
 
 #[test]

@@ -1,12 +1,7 @@
 // |... start fields|invalid for whole object|
 
-use std::ffi::c_void;
-
 use fxhash::{FxHashMap, FxHashSet};
 use iced_x86::{BlockEncoder, BlockEncoderOptions, Code, IcedError, Instruction, InstructionBlock};
-use windows::Win32::System::Memory::{
-    VirtualProtect, PAGE_EXECUTE_READWRITE, PAGE_PROTECTION_FLAGS,
-};
 
 use crate::{cfg::ControlFlowGraph, iced_ext::Decoder, winapi_utils};
 
@@ -246,7 +241,7 @@ impl Trampoline {
     pub unsafe fn apply_to_memory(&self) -> &Self {
         for (ip, block) in &self.generated_code {
             unsafe {
-                winapi_utils::patch_code(*ip, &block);
+                winapi_utils::patch_code(*ip, block);
             }
         }
         self
@@ -270,6 +265,7 @@ impl Trampoline {
     }
 }
 
+#[cfg(test)]
 mod tests {
     #[test]
     fn test_inplace_no_cfg() {
