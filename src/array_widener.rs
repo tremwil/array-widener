@@ -1,11 +1,16 @@
 use std::{
+    cmp::Ordering,
     marker::PhantomData,
     ops::Range,
     sync::{Arc, RwLock},
+    time::Duration,
 };
 
 use fxhash::FxHashMap;
-use iced_x86::{code_asm::CodeAssembler, DecoderOptions, IcedError, Instruction, OpKind, Register};
+use iced_x86::{
+    code_asm::CodeAssembler, DecoderOptions, Encoder, IcedError, Instruction, MemoryOperand,
+    OpKind, Register,
+};
 use pelite::{
     image::{RUNTIME_FUNCTION, UNWIND_INFO},
     pe::{Pe, PeObject, PeView},
@@ -29,7 +34,7 @@ use crate::{
     thunk::{cconv, StoreThunk},
     trampoline::{Trampoline, TrampolineParams},
     widenable::{Widenable, WidenableMeta, WidenedInstanceLayout, WidenedToAllocator},
-    winapi_utils::hmodule_from_ptr,
+    winapi_utils::{self, hmodule_from_ptr},
 };
 
 /// Read a general purpose register from a thread context given an [`iced_x86::Register`].
@@ -53,7 +58,7 @@ pub fn read_gpr(ctx: &CONTEXT, register: Register) -> Option<u64> {
         Register::R15 => ctx.R15,
         _ => return None,
     };
-    Some(full_reg & (4 << register.size()) - 1)
+    Some(full_reg & 1u64.checked_shl(8 * register.size() as u32).unwrap_or(0).wrapping_sub(1))
 }
 
 pub struct Context<'a> {
@@ -124,12 +129,12 @@ impl<O: Widenable, W: Widenable> Builder<O, W> {
     pub fn build(self) -> ArrayWidener {
         let memory_layout = &W::INSTANCE_LAYOUT;
         let field_shift =
-            (memory_layout.split_field_shift() + &W::META.split_field_layout().offset) as i64;
+            (memory_layout.split_field_shift() + &W::META.split_field_layout().offset) as u64;
 
         // TODO: Make this work for arbitrary alignment
         let post_field_shift = field_shift
             + (&W::META.widenable_field_layout().end_offset()
-                - &O::META.widenable_field_layout().end_offset()) as i64;
+                - &O::META.widenable_field_layout().end_offset()) as u64;
 
         ArrayWidener {
             instance_mem_base: 0,
@@ -148,6 +153,7 @@ impl<O: Widenable, W: Widenable> Builder<O, W> {
 }
 
 /// Type of field access in a widened type, as determined by an access type heuristic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WidenedAccessType {
     /// Access type is unknown.
     Unknown,
@@ -168,8 +174,8 @@ pub struct ArrayWidener {
     desired_instance_mem_size: usize,
     alloc_calls: Vec<u64>,
     free_calls: Vec<u64>,
-    field_shift: i64,
-    post_field_shift: i64,
+    field_shift: u64,
+    post_field_shift: u64,
     access_type_heuristic:
         Option<Box<dyn FnMut(&Self, &Context<'_>) -> WidenedAccessType + Send + Sync>>,
 }
@@ -179,7 +185,7 @@ impl ArrayWidener {
         Builder::default()
     }
 
-    pub fn handle_access(&mut self, ctx: &Context<'_>, hook_ip: u64) -> Option<Vec<u8>> {
+    pub fn generate_hook(&mut self, ctx: &Context<'_>, hook_ip: u64) -> Option<Vec<u8>> {
         // Take the heuristic box out of the option so we can pass self to it
         let access_type = match self.access_type_heuristic.take() {
             Some(mut h) => {
@@ -189,6 +195,12 @@ impl ArrayWidener {
             }
             None => self.default_access_heuristic(ctx),
         };
+
+        log::debug!(
+            "instruction {:016x} access type is {:?}",
+            ctx.instruction.ip(),
+            access_type
+        );
 
         let displ_shift = match access_type {
             WidenedAccessType::Unknown => return None,
@@ -202,7 +214,7 @@ impl ArrayWidener {
     fn conditional_hook(
         &self,
         ctx: &Context,
-        displ_shift: i64,
+        displ_shift: u64,
     ) -> Result<CodeAssembler, IcedError> {
         use iced_x86::code_asm::*;
 
@@ -236,18 +248,25 @@ impl ArrayWidener {
         let mut normal_path = asm.create_label();
         let mut end = asm.create_label();
 
-        asm.pushfd()?;
+        let mut no_ip_instruction = ctx.instruction;
+        no_ip_instruction.set_len(0);
+        no_ip_instruction.set_next_ip(0);
+
+        asm.pushfq()?;
         asm.mov(qword_ptr(rsp - 8), rax)?;
 
         // Create instruction with same memory operands
-        let mut lea = Instruction::with(iced_x86::Code::Lea_r64_m);
-        lea.set_op0_register(Register::RAX);
-        lea.set_memory_base(ctx.instruction.memory_base());
-        lea.set_memory_displ_size(ctx.instruction.memory_displ_size());
-        lea.set_memory_displacement64(ctx.instruction.memory_displacement64());
-        lea.set_memory_index(ctx.instruction.memory_index());
-        lea.set_memory_index_scale(ctx.instruction.memory_index_scale());
-        asm.add_instruction(lea)?;
+        asm.add_instruction(Instruction::with2(
+            iced_x86::Code::Lea_r64_m,
+            Register::RAX,
+            MemoryOperand::with_base_index_scale_displ_size(
+                ctx.instruction.memory_base(),
+                ctx.instruction.memory_index(),
+                ctx.instruction.memory_index_scale(),
+                ctx.instruction.memory_displacement64() as i64,
+                ctx.instruction.memory_displ_size(),
+            ),
+        )?)?;
 
         let mut reserved_mem_start = InlineDq::new(&mut asm);
         asm.add(rax, qword_ptr(reserved_mem_start.data_label))?;
@@ -269,20 +288,29 @@ impl ArrayWidener {
         asm.jb(normal_path)?;
 
         asm.mov(rax, qword_ptr(rsp - 8))?;
-        asm.popfd()?;
-        let mut shifted_instr = ctx.instruction;
-        shifted_instr.set_memory_displacement64(
-            ctx.instruction.memory_displacement64().wrapping_add_signed(displ_shift),
-        );
+        asm.popfq()?;
+
+        let mut shifted_instr = no_ip_instruction;
+        let new_displ = no_ip_instruction.memory_displacement64().wrapping_sub(displ_shift);
+        let new_displ_size = match (new_displ as i64).abs() {
+            n if n < i8::MAX.into() => 1,
+            0 => 0,
+            _ => 8, // Quirk of iced-x86. in 64-bit mode, displ_size for disp32 is not 4 but 8??
+        };
+        shifted_instr.set_memory_displacement64(new_displ);
+        shifted_instr.set_memory_displ_size(new_displ_size);
+
         asm.add_instruction(shifted_instr)?;
         asm.jmp(end)?;
 
         asm.set_label(&mut normal_path)?;
         asm.mov(rax, qword_ptr(rsp - 8))?;
-        asm.popfd()?;
-        asm.add_instruction(ctx.instruction)?;
+        asm.popfq()?;
+        asm.add_instruction(no_ip_instruction)?;
 
         asm.set_label(&mut end)?;
+        asm.zero_bytes()?;
+        asm.nops_with_size(5)?; // We will insert the jmp back here
         Ok(asm)
     }
 
@@ -295,7 +323,7 @@ impl ArrayWidener {
 
         // `WidenedInstanceLayout` layout restriction: size >= align is a power of 2
         let instance_mem_base =
-            ctx.accessed_memory_address & !(self.memory_layout.block_size as usize);
+            ctx.accessed_memory_address & !(self.memory_layout.block_size as usize - 1);
 
         let orig_field_layout = self.orig_layout.widenable_field_layout();
         let wide_field_layout = self.wide_layout.widenable_field_layout();
@@ -342,6 +370,7 @@ pub struct ArrayWidenerManager {
     array_wideners: Vec<ArrayWidener>,
     codegen_arenas: RWEArenaCache,
     cfg: ControlFlowGraph,
+    encoder: Encoder,
     decoder: Decoder<'static>,
     access_hooks: FxHashMap<u64, u64>,
     original_instruction_addresses: FxHashMap<u64, u64>,
@@ -353,6 +382,7 @@ impl ArrayWidenerManager {
             array_wideners: Default::default(),
             codegen_arenas: RWEArenaCache::new(codegen_arena_size),
             cfg: ControlFlowGraph::default(),
+            encoder: Encoder::try_with_capacity(64, 15).unwrap(),
             // SAFETY: Definitely not safe :)
             decoder: unsafe {
                 Decoder::try_with_slice_ptr(
@@ -391,56 +421,43 @@ impl ArrayWidenerManager {
                 shared_alloc.write().expect("shared WidenedToAllocator poisoned").free(ptr)
             };
 
-            let mut apply_trampoline = |arena: &mut RWEArena, ip, thunk| {
-                let trampoline = Trampoline::new(
-                    &mut self.decoder,
-                    None,
-                    TrampolineParams {
-                        hook_ip: thunk,
-                        insert_ip: ip,
-                        replace_instruction: true,
-                        trampoline_memory: arena.avail_buffer(),
-                    },
-                )
-                .unwrap();
-
-                unsafe {
-                    trampoline.apply_to_memory();
-                }
+            let near_call_hook = |ip, thunk| unsafe {
+                let ip_offset = (thunk as i64 - (ip + 5) as i64) as i32;
+                *(ip as *mut u8) = 0xE8;
+                ((ip + 1) as *mut i32).write_unaligned(ip_offset);
             };
 
             for &alloc_call in &aw.alloc_calls {
                 let arena = self.codegen_arenas.near_ptr(alloc_call as *const _).unwrap();
-                let thunk = arena.store_thunk(cconv::C, new_alloc.clone()).unwrap().leak();
+                let thunk = arena.store_thunk(cconv::C(new_alloc.clone())).unwrap().leak();
                 log::debug!(
                     "hooking alloc call: {:016x} -> {:016x}",
                     alloc_call,
                     thunk as u64
                 );
-                apply_trampoline(arena, alloc_call, thunk as u64);
+                near_call_hook(alloc_call, thunk as u64);
             }
             for &alloc_call in &aw.free_calls {
                 let arena = self.codegen_arenas.near_ptr(alloc_call as *const _).unwrap();
-                let thunk = arena.store_thunk(cconv::C, new_free.clone()).unwrap().leak();
+                let thunk = arena.store_thunk(cconv::C(new_free.clone())).unwrap().leak();
                 log::debug!(
                     "hooking free call: {:016x} -> {:016x}",
                     alloc_call,
                     thunk as u64
                 );
-                apply_trampoline(arena, alloc_call, thunk as u64);
+                near_call_hook(alloc_call, thunk as u64);
             }
         }
 
         let arena = Box::leak(Box::new(RWEArena::new(0x1000)));
         let lock = RwLock::new(self);
         let thunk = arena
-            .store_thunk(
-                cconv::System,
+            .store_thunk(cconv::System(
                 move |ex_ptrs: *mut EXCEPTION_POINTERS| -> i32 {
                     let mut array_widener_man = lock.write().expect("array widener lock poisoned");
                     unsafe { array_widener_man.handle_exception(ex_ptrs) }
                 },
-            )
+            ))
             .unwrap();
 
         unsafe {
@@ -483,10 +500,16 @@ impl ArrayWidenerManager {
                     instruction_address,
                     accessed_memory_address
                 );
+                winapi_utils::suspend_threads();
+                std::thread::sleep(Duration::from_secs(100000000));
                 return EXCEPTION_CONTINUE_SEARCH;
             }
             Some(aw) => aw,
         };
+
+        log::debug!(
+            "instruction {instruction_address:016x} accessed {accessed_memory_address:016x}"
+        );
 
         // In hot multithreaded code, a second thread might hit the instruction before patches are
         // observed. To avoid patching twice, we keep track of existing patches
@@ -548,15 +571,13 @@ impl ArrayWidenerManager {
                 .unwrap_or(&instruction_address) as usize,
         };
 
-        let addr_range = arena.avail_address_range();
-        let hook_ip = addr_range.start as u64;
+        let hook_ip = arena.avail_buffer().addr() as u64;
         // Let the array widener generate the access hook
-        if let Some(hook) = array_widener.handle_access(&ctx, hook_ip) {
-            let hook_buf = arena.alloc_at(hook_ip as usize, hook.len()).unwrap();
-            unsafe {
-                (*hook_buf).copy_from_slice(&hook);
-            }
+        if let Some(hook) = array_widener.generate_hook(&ctx, hook_ip) {
+            let hook_buf = unsafe { &mut *arena.alloc_at(hook_ip as usize, hook.len()).unwrap() };
+            hook_buf.copy_from_slice(&hook);
 
+            // Create trampoline
             let trampoline = Trampoline::new(
                 &mut self.decoder,
                 maybe_cfg.as_ref().map(|x| &**x),
@@ -569,13 +590,36 @@ impl ArrayWidenerManager {
             )
             .unwrap();
 
+            // Claim memory
+            arena
+                .alloc_at(
+                    trampoline.params.trampoline_memory.addr(),
+                    trampoline.moved_code().len(),
+                )
+                .unwrap();
+
+            // Encode jmp out of the hook and rest of trampoline
+            let ret_addr_point = unsafe { hook_buf.as_mut_ptr_range().end.sub(5) };
             unsafe {
+                encode_at(
+                    &mut self.encoder,
+                    Instruction::with_branch(
+                        iced_x86::Code::Jmp_rel32_64,
+                        trampoline.hook_return_ip,
+                    )
+                    .unwrap(),
+                    ret_addr_point,
+                );
                 trampoline.apply_to_memory();
             }
-            maybe_cfg.map(|cfg| trampoline.fixup_cfg(&mut self.decoder, cfg));
+            // Update CFG to reflect new program state
+            maybe_cfg.map(|cfg| {
+                trampoline.fixup_cfg(&mut self.decoder, cfg);
+                cfg.walk(&mut self.decoder, ret_addr_point as u64)
+            });
 
             // Update original instruction addresses map with instruction relocations done by
-            // applyting the trampoline
+            // applying the trampoline
             for (old_ip, new_ip) in &trampoline.relocation_map {
                 let original_for_old =
                     *self.original_instruction_addresses.get(old_ip).unwrap_or(old_ip);
@@ -627,13 +671,20 @@ unsafe fn extend_cfg_if_required<'a>(
 
     let rva = instr_addr - mod_handle.0 as u64;
     let mod_range = pe.image().as_ptr_range();
+    // Note: we can't use the pelite helper methods for this as they are broken
+    // (binary logic is inverted and doesn't handle chained runtime functions)
     let fn_entry_point = ex_table
-        .lookup_function_entry(rva as u32)
-        .map(|fun| unsafe {
+        .image()
+        .binary_search_by(|rf| match rf {
+            rf if rf.EndAddress <= rva as u32 => Ordering::Less,
+            rf if rf.BeginAddress > rva as u32 => Ordering::Greater,
+            _ => Ordering::Equal,
+        })
+        .map(|index| unsafe {
             // This mess is unsound if the pe file is not valid
             // I also don't care for now
             const UNW_FLAG_CHAININFO: u8 = 0x4;
-            let mut fun = fun.image();
+            let mut fun = &ex_table.image()[index];
             let mut unwind_info = &*((mod_addr + fun.UnwindData as u64) as *const UNWIND_INFO);
             while unwind_info.VersionFlags & UNW_FLAG_CHAININFO != 0 {
                 let offset = (unwind_info.CountOfCodes + 1 & !1) as usize;
@@ -643,26 +694,41 @@ unsafe fn extend_cfg_if_required<'a>(
             }
             mod_addr + fun.BeginAddress as u64
         })
-        .or_else(|| {
+        .or_else(|_| {
             // If instruction is not within the runtime function table, it is part of a leaf
             // function get the return address from rsp and try to resolve
             // function start from a call instruction
-            let return_address = rsp_value;
+            let return_address = unsafe { *(rsp_value as usize as *const u64) };
             let call_opcode_addr = (return_address - 5) as *const u8;
-            let call_displ_addr = (return_address - 4) as *const u32;
+            let call_displ_addr = (return_address - 4) as *const i32;
 
             (mod_range.contains(&((return_address - 1) as *const u8))
                 && mod_range.contains(&call_opcode_addr)
                 && unsafe { *call_opcode_addr } == 0xE8)
-                .then(|| return_address + unsafe { call_displ_addr.read_unaligned() } as u64)
-        })
-        .ok_or_else(|| {
-            format!(
-                "cannot find function for instruction at {:016x}",
-                instr_addr
-            )
+                .then(|| {
+                    return_address
+                        .wrapping_add_signed(unsafe { call_displ_addr.read_unaligned() } as i64)
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "cannot find function for instruction at {:016x}",
+                        instr_addr
+                    )
+                })
         })?;
 
     cfg.walk(decoder, fn_entry_point);
     Ok(cfg)
+}
+
+unsafe fn encode_at(encoder: &mut Encoder, instruction: Instruction, ip: *mut u8) {
+    let instr_size = encoder.encode(&instruction, ip as u64).unwrap();
+    let mut instr_buf = encoder.take_buffer();
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(instr_buf.as_ptr_range().end.sub(instr_size), ip, instr_size);
+    }
+
+    instr_buf.truncate(instr_size);
+    encoder.set_buffer(instr_buf);
 }

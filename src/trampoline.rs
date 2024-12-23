@@ -105,6 +105,7 @@ impl Trampoline {
         to_move.sort_by_key(|m| m.instruction.ip());
 
         let pos = to_move.iter().rposition(|m| m.instruction.ip() == params.insert_ip).unwrap();
+        let orig_instr_len = to_move[pos].instruction.len();
         if params.replace_instruction {
             to_move.remove(pos);
         }
@@ -114,26 +115,14 @@ impl Trampoline {
             to_move[pos].instruction.set_next_ip(0);
         }
 
-        // if log::STATIC_MAX_LEVEL >= log::Level::Trace {
-        //     log::trace!("moving instructions: ");
-        //     to_move.iter().for_each(|m| {
-        //         log::trace!(
-        //             "{:017X} {:?} ({})",
-        //             m.instruction.ip(),
-        //             m.instruction.code(),
-        //             m.is_block_start
-        //         )
-        //     });
-        // }
-
         // Fixup the relocated instructions block control flow
         let mut in_trampoline = vec![];
         let mut leaf_jmps = vec![];
 
         // Track where the jmp instruction going to the hook ends up
         let mut hook_ret_offset = 0;
-        let mut i_trampoline_block = None;
-        let mut i_trampoline_instr = 0;
+        let mut trampoline_block_ip = params.trampoline_memory.addr() as u64;
+        let mut trampoline_instr_index = 0;
 
         for (i, moved) in to_move.iter().enumerate() {
             let instr = &moved.instruction;
@@ -146,12 +135,12 @@ impl Trampoline {
                 // If a regular jmp, condition can be inlined
                 if instr.is_jmp_short_or_near() {
                     if is_insert_ip && next_is_block_start {
-                        i_trampoline_block = Some(leaf_jmps.len());
-                        i_trampoline_instr = 0;
-                        hook_ret_offset = 5;
+                        trampoline_block_ip = instr.ip();
+                        trampoline_instr_index = 0;
+                        hook_ret_offset = orig_instr_len.max(5);
                     }
                     else if is_insert_ip {
-                        i_trampoline_instr = in_trampoline.len();
+                        trampoline_instr_index = in_trampoline.len();
                     }
                     leaf_jmps.push((*instr, instr.ip()));
                     continue;
@@ -165,8 +154,8 @@ impl Trampoline {
                 }
             }
 
-            if instr.ip() == params.insert_ip {
-                i_trampoline_instr = in_trampoline.len();
+            if is_insert_ip {
+                trampoline_instr_index = in_trampoline.len();
             }
             in_trampoline.push(*instr);
 
@@ -217,9 +206,12 @@ impl Trampoline {
             })
             .collect();
 
-        let last_block = new_blocks.last().unwrap();
+        let moved_block = new_blocks
+            .iter()
+            .find(|b| b.rip == params.trampoline_memory.addr() as u64)
+            .unwrap();
         relocation_map.extend(in_trampoline.iter().enumerate().filter_map(|(i, instr)| {
-            let ip = last_block.rip + last_block.new_instruction_offsets[i] as u64;
+            let ip = moved_block.rip + moved_block.new_instruction_offsets[i] as u64;
             if instr.ip() == 0 {
                 new_instructions.push(ip);
                 None
@@ -231,8 +223,10 @@ impl Trampoline {
 
         // Compute return IP
         let hook_return_ip = {
-            let block = &new_blocks[i_trampoline_block.unwrap_or(new_blocks.len() - 1)];
-            block.rip + block.new_instruction_offsets[i_trampoline_instr] as u64 + hook_ret_offset
+            let block = new_blocks.iter().find(|b| b.rip == trampoline_block_ip).unwrap();
+            block.rip
+                + block.new_instruction_offsets[trampoline_instr_index] as u64
+                + hook_ret_offset as u64
         };
 
         Ok(Self {
@@ -259,5 +253,42 @@ impl Trampoline {
             cfg.walk(decoder, new_ip);
         }
         self
+    }
+
+    pub fn moved_code(&self) -> &[u8] {
+        self.generated_code
+            .iter()
+            .find_map(|(ip, v)| {
+                (*ip == self.params.trampoline_memory.addr() as u64).then_some(v.as_slice())
+            })
+            .unwrap()
+    }
+}
+
+mod tests {
+    #[test]
+    fn test_inplace_no_cfg() {
+        use iced_x86::{code_asm::*, DecoderOptions};
+
+        use super::Trampoline;
+        use crate::iced_ext::Decoder;
+
+        let orig_code_ip = 0x1000;
+
+        let mut asm = CodeAssembler::new(64).unwrap();
+        asm.mov(qword_ptr(rcx), -1i32).unwrap();
+        let bytes = asm.assemble(orig_code_ip).unwrap();
+
+        Trampoline::new(
+            &mut Decoder::with_ip(64, &bytes, orig_code_ip, DecoderOptions::NONE),
+            None,
+            super::TrampolineParams {
+                hook_ip: 0x2000,
+                insert_ip: orig_code_ip,
+                replace_instruction: true,
+                trampoline_memory: std::ptr::slice_from_raw_parts_mut(0x3000 as *mut u8, 100),
+            },
+        )
+        .unwrap();
     }
 }

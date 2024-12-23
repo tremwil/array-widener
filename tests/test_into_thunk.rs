@@ -1,6 +1,6 @@
 use array_widener::{
     rwe_buffer::RWEArena,
-    thunk::{cconv, StoreThunk},
+    thunk::{cconv, FnMutThunkable, StoreThunk},
 };
 
 #[test]
@@ -14,7 +14,7 @@ fn into_thunk_simple() {
         old_data
     };
 
-    let thunk = arena.store_mut_thunk(cconv::C, fetch_add_data).unwrap();
+    let thunk = arena.store_mut_thunk(cconv::C(fetch_add_data)).unwrap();
     let bare_fn = thunk.bare_fn();
 
     assert!(unsafe { bare_fn(&69) } == 420);

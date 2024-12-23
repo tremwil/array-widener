@@ -142,7 +142,7 @@ impl RWEBuffer {
                 None,
                 size,
                 MEM_RESERVE | MEM_COMMIT,
-                PAGE_READWRITE.0,
+                PAGE_EXECUTE_READWRITE.0,
                 Some(&mut extended_params),
             )
         };

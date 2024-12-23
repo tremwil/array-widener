@@ -26,10 +26,7 @@ fn setup_console() -> Result<(), Box<dyn Error>> {
 
 fn bootstrap() -> Result<(), Box<dyn Error>> {
     setup_console()?;
-
     simple_logger::SimpleLogger::new().with_level(log::LevelFilter::Debug).init()?;
-
-    std::io::stdin().read_line(&mut String::new()).unwrap();
 
     const ALLOC_RVA: u64 = 0x0676681;
     const FREE_RVA: u64 = 0x0677c1f;
@@ -37,7 +34,7 @@ fn bootstrap() -> Result<(), Box<dyn Error>> {
     let er_base = unsafe { GetModuleHandleA(PCSTR(std::ptr::null())) }.unwrap().0 as u64;
     log::info!("ER base: {er_base:016x}");
 
-    let pmi_widener = ArrayWidener::new::<PartyMemberInfo<6>, PartyMemberInfo<6>>()
+    let pmi_widener = ArrayWidener::new::<PartyMemberInfo<6>, PartyMemberInfo<127>>()
         .alloc_calls([er_base + ALLOC_RVA])
         .free_calls([er_base + FREE_RVA])
         .reserved_memory_size(0x10000)

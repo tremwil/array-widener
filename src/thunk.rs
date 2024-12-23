@@ -13,10 +13,7 @@ const CLOSURE_ADDR_MAGIC: usize = 0xf6f6531b15b0e802;
 ///
 /// # Safety
 /// The contract that must be held by implementors is not public. Do *not* implement this trait.
-pub unsafe trait FnMutThunkable<C, A, R> {
-    /// Bare function type with the same signature as `Self`. Should have the unsafe type.
-    type AsBareFn: Copy;
-
+pub unsafe trait FnMutThunkable<BareFn: Copy> {
     /// Thunk which calls an (invalid) instance of the `Self`. Used as a template for generating a
     /// more specific code by copying a portion of the instructions and replacing the instance
     /// pointer.
@@ -24,7 +21,7 @@ pub unsafe trait FnMutThunkable<C, A, R> {
     /// # Safety
     /// Do not call this directly. **It will always crash!** Use the function provided by
     /// [`IntoMutThunk::into_mut_thunk`] instead.
-    const MUT_THUNK: Self::AsBareFn;
+    const MUT_THUNK: BareFn;
 }
 
 /// Trait implemented by a thunkable [`Fn`] implementor
@@ -34,7 +31,7 @@ pub unsafe trait FnMutThunkable<C, A, R> {
 ///
 /// # Safety
 /// The contract that must be held by implementors is not public. Do *not* implement this trait.
-pub unsafe trait FnThunkable<C, A, R>: FnMutThunkable<C, A, R> {
+pub unsafe trait FnThunkable<BareFn: Copy>: FnMutThunkable<BareFn> {
     /// Thunk which calls an (invalid) instance of the `Self`. Used as a template for generating a
     /// more specific code by copying a portion of the instructions and replacing the instance
     /// pointer.
@@ -42,44 +39,58 @@ pub unsafe trait FnThunkable<C, A, R>: FnMutThunkable<C, A, R> {
     /// # Safety
     /// Do not call this directly. **It will always crash!** Use the function provided by
     /// [`IntoThunk::into_thunk`] instead.
-    const THUNK: Self::AsBareFn;
+    const THUNK: BareFn;
 }
 
-/// Calling conventions that can be passed to [`StoreThunk::store_mut_thunk`] and
-/// [`StoreThunk::store_thunk`].
+/// Calling conventions wrappers that can wrap a closure before passing it
+/// [`StoreThunk::store_mut_thunk`] and [`StoreThunk::store_thunk`] to help with type inference.
 pub mod cconv {
     #[allow(unused_imports)]
     use super::StoreThunk;
 
-    pub struct C;
+    /// The `"C"` calling convention.
+    #[repr(transparent)]
+    pub struct C<F>(pub F);
 
-    pub struct System;
+    /// The `"system"` calling convention.
+    #[repr(transparent)]
+    pub struct System<F>(pub F);
 
+    /// The `"sysv64"` calling convention.
     #[cfg(all(not(windows), target_pointer_width = "64", target_arch = "x86_64"))]
-    pub struct Sysv64;
+    #[repr(transparent)]
+    pub struct Sysv64<F>(pub F);
 
+    /// The `"fastcall"` calling convention.
     #[cfg(windows)]
-    pub struct Fastcall;
+    #[repr(transparent)]
+    pub struct Fastcall<F>(pub F);
 
+    /// The `"stdcall"` calling convention.
     #[cfg(windows)]
-    pub struct Stdcall;
+    #[repr(transparent)]
+    pub struct Stdcall<F>(pub F);
 
+    /// The `"cdecl"` calling convention.
     #[cfg(windows)]
-    pub struct Cdecl;
+    #[repr(transparent)]
+    pub struct Cdecl<F>(pub F);
 
+    /// The `"thiscall"` calling convention.
     #[cfg(all(windows, target_pointer_width = "32"))]
-    pub struct Thicall;
+    #[repr(transparent)]
+    pub struct Thiscall<F>(pub F);
 
+    /// The `"win64"` calling convention.
     #[cfg(all(windows, target_pointer_width = "64"))]
-    pub struct Win64;
+    #[repr(transparent)]
+    pub struct Win64<F>(pub F);
 }
 
 macro_rules! fn_thunkable_impl {
-    ($cconv:ty[$cconv_lit:literal] ($($id_tys: ident,)*) ($($args:ident: $tys:ty,)*)) => {
-        unsafe impl<F: FnMut($($tys),*) -> R, R, $($id_tys),*> FnMutThunkable<$cconv, ($($tys,)*), R> for F {
-            type AsBareFn = unsafe extern $cconv_lit fn($($tys),*) -> R;
-
-            const MUT_THUNK: Self::AsBareFn = {
+    ($cconv:path[$cconv_lit:literal] ($($id_tys: ident,)*) ($($args:ident: $tys:ty,)*)) => {
+        unsafe impl<F: FnMut($($tys),*) -> R, R, $($id_tys),*> FnMutThunkable<unsafe extern $cconv_lit fn($($tys,)*) -> R> for F {
+            const MUT_THUNK: unsafe extern $cconv_lit fn($($tys,)*) -> R = {
                 unsafe extern $cconv_lit fn thunk<F: FnMut($($tys),*) -> R, R, $($id_tys),*>($($args: $tys),*) -> R {
                     unsafe {
                         let mut closure_ptr: *mut F;
@@ -100,8 +111,12 @@ macro_rules! fn_thunkable_impl {
             };
         }
 
-        unsafe impl<F: Fn($($tys),*) -> R, R, $($id_tys),*> FnThunkable<$cconv, ($($tys,)*), R> for F {
-            const THUNK: Self::AsBareFn = {
+        unsafe impl<F: FnMutThunkable<unsafe extern $cconv_lit fn($($tys,)*) -> R>, R, $($id_tys),*> FnMutThunkable<unsafe extern $cconv_lit fn($($tys,)*) -> R> for $cconv {
+            const MUT_THUNK: unsafe extern $cconv_lit fn($($tys,)*) -> R = F::MUT_THUNK;
+        }
+
+        unsafe impl<F: Fn($($tys),*) -> R, R, $($id_tys),*> FnThunkable<unsafe extern $cconv_lit fn($($tys,)*) -> R> for F {
+            const THUNK: unsafe extern $cconv_lit fn($($tys,)*) -> R  = {
                 unsafe extern $cconv_lit fn thunk<F: Fn($($tys),*) -> R, R, $($id_tys),*>($($args: $tys),*) -> R {
                     unsafe {
                         let closure_ptr: *const F;
@@ -121,6 +136,10 @@ macro_rules! fn_thunkable_impl {
                 thunk::<F, R, $($tys),*>
             };
         }
+
+        unsafe impl<F: FnThunkable<unsafe extern $cconv_lit fn($($tys,)*) -> R>, R, $($id_tys),*> FnThunkable<unsafe extern $cconv_lit fn($($tys,)*) -> R> for $cconv {
+            const THUNK: unsafe extern $cconv_lit fn($($tys,)*) -> R = F::THUNK;
+        }
     };
 }
 
@@ -128,88 +147,40 @@ seq!(M in 0..12 {
     #(
         seq!(N in 0..M {
             #[cfg(target_arch = "x86_64")] // For now
-            fn_thunkable_impl! { cconv::C["C"] (#(T~N,)*) (#(a~N: T~N,)*) }
+            fn_thunkable_impl! { cconv::C<F>["C"] (#(T~N,)*) (#(a~N: T~N,)*) }
 
             #[cfg(target_arch = "x86_64")] // For now
-            fn_thunkable_impl! { cconv::System["system"] (#(T~N,)*) (#(a~N: T~N,)*) }
+            fn_thunkable_impl! { cconv::System<F>["system"] (#(T~N,)*) (#(a~N: T~N,)*) }
 
             #[cfg(all(not(windows), target_pointer_width = "64", target_arch = "x86_64"))]
-            fn_thunkable_impl! { cconv::Sysv64["sysv64"] (#(T~N,)*) (#(a~N: T~N,)*) }
+            fn_thunkable_impl! { cconv::Sysv64<F>["sysv64"] (#(T~N,)*) (#(a~N: T~N,)*) }
 
             #[cfg(windows)]
-            fn_thunkable_impl! { cconv::Fastcall["fastcall"] (#(T~N,)*) (#(a~N: T~N,)*) }
+            fn_thunkable_impl! { cconv::Fastcall<F>["fastcall"] (#(T~N,)*) (#(a~N: T~N,)*) }
 
             #[cfg(windows)]
-            fn_thunkable_impl! { cconv::Stdcall["stdcall"] (#(T~N,)*) (#(a~N: T~N,)*) }
+            fn_thunkable_impl! { cconv::Stdcall<F>["stdcall"] (#(T~N,)*) (#(a~N: T~N,)*) }
 
             #[cfg(windows)]
-            fn_thunkable_impl! { cconv::Cdecl["cdecl"] (#(T~N,)*) (#(a~N: T~N,)*) }
+            fn_thunkable_impl! { cconv::Cdecl<F>["cdecl"] (#(T~N,)*) (#(a~N: T~N,)*) }
 
             #[cfg(all(windows, target_pointer_width = "32"))]
-            fn_thunkable_impl! { cconv::Thiscall["thiscall"] (#(T~N,)*) (#(a~N: T~N,)*) }
+            fn_thunkable_impl! { cconv::Thiscall<F>["thiscall"] (#(T~N,)*) (#(a~N: T~N,)*) }
 
             #[cfg(all(windows, target_pointer_width = "64"))]
-            fn_thunkable_impl! { cconv::Win64["win64"] (#(T~N,)*) (#(a~N: T~N,)*) }
+            fn_thunkable_impl! { cconv::Win64<F>["win64"] (#(T~N,)*) (#(a~N: T~N,)*) }
         });
     )*
 });
 
-// seq!(M in 0..=16 {
-//     #(
-//         seq!(N in 0..M {
-//             unsafe impl<F: FnMut(#(T~N,)*) -> R, R, #(T~N,)*> FnMutThunkable<(#(T~N,)*), R> for F
-// {                 type AsBareFn = unsafe extern "C" fn(#(T~N,)*) -> R;
-
-//                 const MUT_THUNK: Self::AsBareFn = {
-//                     unsafe extern "C" fn thunk<F: FnMut(#(T~N,)*) -> R, R, #(T~N,)*>(#(a~N:
-// T~N,)*) -> R {                         let mut closure_ptr: *mut F;
-//                         asm!(
-//                             "movabs {cl_magic}, {cl_addr}",
-//                             "movabs $2f, {jmp_addr}",
-//                             "jmp *{jmp_addr}",
-//                             "2:",
-//                             cl_addr = out(reg) closure_ptr,
-//                             cl_magic = const CLOSURE_ADDR_MAGIC,
-//                             jmp_addr = out(reg) _,
-//                             options(nostack, att_syntax)
-//                         );
-//                         (*closure_ptr)(#(a~N,)*)
-//                     }
-//                     thunk::<F, R, #(T~N,)*>
-//                 };
-//             }
-
-//             unsafe impl<F: Fn(#(T~N,)*) -> R, R, #(T~N,)*> FnThunkable<(#(T~N,)*), R> for F {
-//                 const THUNK: Self::AsBareFn = {
-//                     unsafe extern "C" fn thunk<F: Fn(#(T~N,)*) -> R, R, #(T~N,)*>(#(a~N: T~N,)*)
-// -> R {                         let closure_ptr: *const F;
-//                         asm!(
-//                             "movabs {cl_magic}, {cl_addr}",
-//                             "movabs $2f, {jmp_addr}",
-//                             "jmp *{jmp_addr}",
-//                             "2:",
-//                             cl_addr = out(reg) closure_ptr,
-//                             cl_magic = const CLOSURE_ADDR_MAGIC,
-//                             jmp_addr = out(reg) _,
-//                             options(nostack, att_syntax)
-//                         );
-//                         (*closure_ptr)(#(a~N,)*)
-//                     }
-//                     thunk::<F, R, #(T~N,)*>
-//                 };
-//             }
-//         });
-//     )*
-// });
-
-unsafe fn store_thunk_common<'a, Arena, F, C, A, R>(
+unsafe fn store_thunk_common<'a, Arena, F, BareFn: Copy>(
     rwe_buf: &'a Arena,
     closure: F,
-    thunk_template: F::AsBareFn,
-) -> Result<ThunkRef<'a, F, C, A, R>, Arena::Error>
+    thunk_template: BareFn,
+) -> Result<ThunkRef<'a, F, BareFn>, Arena::Error>
 where
     Arena: ExecArena + ?Sized,
-    F: FnMutThunkable<C, A, R> + 'a,
+    F: FnMutThunkable<BareFn> + 'a,
 {
     let closure_ref = rwe_buf.store(closure)?;
     let thunk_start: *const u8 = unsafe { std::mem::transmute_copy(&thunk_template) };
@@ -239,12 +210,12 @@ where
 ///
 /// A [`Deref`] implementation is provided for convenience, but it is clearer to use
 /// [`ThunkRef::bare_fn`] explicitly.
-pub struct ThunkRef<'a, F: FnMutThunkable<C, A, R> + 'a, C, A, R> {
+pub struct ThunkRef<'a, F: FnMutThunkable<BareFn> + 'a, BareFn: Copy> {
     closure_ref: ArenaRef<'a, F>,
-    bare_fn: F::AsBareFn,
+    bare_fn: BareFn,
 }
 
-impl<'a, F: FnMutThunkable<C, A, R> + 'a, C, A, R> ThunkRef<'a, F, C, A, R> {
+impl<'a, F: FnMutThunkable<BareFn> + 'a, BareFn: Copy> ThunkRef<'a, F, BareFn> {
     /// Return the bare function stored in this [`ThunkRef`].
     ///
     /// # Safety
@@ -253,7 +224,7 @@ impl<'a, F: FnMutThunkable<C, A, R> + 'a, C, A, R> ThunkRef<'a, F, C, A, R> {
     /// - When capturing by reference, rust aliasing rules are respected;
     /// - In the case of an [`FnMut`], no concurrent executions are performed.
     #[inline(always)]
-    pub fn bare_fn(&self) -> F::AsBareFn {
+    pub fn bare_fn(&self) -> BareFn {
         self.bare_fn
     }
 
@@ -265,14 +236,14 @@ impl<'a, F: FnMutThunkable<C, A, R> + 'a, C, A, R> ThunkRef<'a, F, C, A, R> {
     /// - The bare function is never used past the lifetime of `self`;
     /// - When capturing by reference, rust aliasing rules are respected;
     /// - In the case of an [`FnMut`], no concurrent executions are performed.
-    pub fn leak(self) -> F::AsBareFn {
+    pub fn leak(self) -> BareFn {
         self.closure_ref.leak();
         self.bare_fn
     }
 }
 
-impl<'a, F: FnMutThunkable<C, A, R> + 'a, C, A, R> Deref for ThunkRef<'a, F, C, A, R> {
-    type Target = F::AsBareFn;
+impl<'a, F: FnMutThunkable<BareFn> + 'a, BareFn: Copy> Deref for ThunkRef<'a, F, BareFn> {
+    type Target = BareFn;
 
     #[inline(always)]
     fn deref(&self) -> &Self::Target {
@@ -295,11 +266,10 @@ pub trait StoreThunk: ExecArena {
     /// - The bare function is never invoked concurrently.
     #[inline(always)]
     #[allow(unused_variables)]
-    fn store_mut_thunk<'a, F: FnMutThunkable<C, A, R> + 'a, C, A, R>(
+    fn store_mut_thunk<'a, F: FnMutThunkable<BareFn> + 'a, BareFn: Copy>(
         &'a self,
-        cconv: C,
         fun: F,
-    ) -> Result<ThunkRef<'a, F, C, A, R>, Self::Error> {
+    ) -> Result<ThunkRef<'a, F, BareFn>, Self::Error> {
         unsafe { store_thunk_common(self, fun, F::MUT_THUNK) }
     }
 
@@ -314,11 +284,10 @@ pub trait StoreThunk: ExecArena {
     /// - When capturing by reference, rust aliasing rules are respected.
     #[inline(always)]
     #[allow(unused_variables)]
-    fn store_thunk<'a, F: FnThunkable<C, A, R> + 'a, C, A, R>(
+    fn store_thunk<'a, F: FnThunkable<BareFn> + 'a, BareFn: Copy>(
         &'a self,
-        cconv: C,
         fun: F,
-    ) -> Result<ThunkRef<'a, F, C, A, R>, Self::Error> {
+    ) -> Result<ThunkRef<'a, F, BareFn>, Self::Error> {
         unsafe { store_thunk_common(self, fun, F::THUNK) }
     }
 }
