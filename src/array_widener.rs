@@ -156,12 +156,11 @@ impl<O: Widenable, W: Widenable> Builder<O, W> {
         // bs       sf        wf          wfe         struct pointer   noaccess memory
         // |         |         |           |           |               |
         let field_shift =
-            (memory_layout.split_field_shift() + &W::META.split_field_layout().offset) as u64;
+            (memory_layout.split_field_shift() + W::META.split_field_layout().offset) as u64;
 
         // TODO: Make this work for arbitrary alignment
-        let post_field_shift = field_shift
-            - (W::META.widenable_field_layout().end_offset()
-                + O::META.widenable_field_layout().end_offset()) as u64;
+        let post_field_shift = field_shift + O::META.widenable_field_layout().end_offset() as u64
+            - W::META.widenable_field_layout().end_offset() as u64;
 
         ArrayWidener {
             instance_mem_base: 0,
