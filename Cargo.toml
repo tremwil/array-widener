@@ -43,6 +43,6 @@ features = [
 codegen-units = 1
 opt-level = 3
 panic = "abort"
-debug = "full"
+debug = "none"
 debug-assertions = false
 overflow-checks = false
